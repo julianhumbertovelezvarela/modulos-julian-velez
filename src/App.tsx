@@ -144,6 +144,32 @@ export const sortDoctors = (a: Doctor, b: Doctor) => {
   return a.nombre.localeCompare(b.nombre);
 };
 
+export const getDoctorDisplayName = (med: any): string => {
+  if (!med) return '';
+  const names = (med.nombre || '').trim().split(/\s+/);
+  const firstName = names[0] || '';
+  let firstLastName = '';
+  if (med.apellidos) {
+    firstLastName = med.apellidos.trim().split(/\s+/)[0] || '';
+  } else if (names.length > 1) {
+    firstLastName = names[1] || '';
+  }
+  
+  let predictedGender = med.genero;
+  if (!predictedGender) {
+    const lowFirst = firstName.toLowerCase();
+    predictedGender = (lowFirst.endsWith('a') && lowFirst !== 'andrea' && lowFirst !== 'luca' && lowFirst !== 'josua') ? 'F' : 'M';
+  }
+  if (firstName.toLowerCase() === 'andrea') predictedGender = 'F';
+
+  const prefix = predictedGender === 'F' ? 'Dra.' : 'Dr.';
+  const capitalize = (text: string) => {
+    if (!text) return '';
+    return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+  };
+  return `${prefix} ${capitalize(firstName)}${firstLastName ? ' ' + capitalize(firstLastName) : ''}`;
+};
+
 // --- Colombian Holiday Helper Logic ----
 function getEasterSunday(year: number) {
   const a = year % 19;
@@ -256,6 +282,7 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
   const [activeTab, setActiveTab] = useState<'home' | 'turnos' | 'census' | 'committee' | 'solicitudes' | 'novedades' | 'rural' | 'bd' | 'docs' | 'admin' | 'ayuda' | 'stats' | 'pic' | 'toolbox'>('turnos');
   
   // Date Selection
@@ -303,6 +330,81 @@ export default function App() {
   const [notification, setNotification] = useState<{message: string, type: 'info' | 'success' | 'error'} | null>(null);
   const [aiReport, setAiReport] = useState<string | null>(null);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
+
+  useEffect(() => {
+    const handleGlobalCopy = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName.toLowerCase() === 'input' || 
+        target.closest('input') || 
+        target.tagName.toLowerCase() === 'textarea' ||
+        target.closest('textarea') || 
+        target.tagName.toLowerCase() === 'select' || 
+        target.closest('select')
+      ) return;
+
+      let textToCopy = '';
+
+      if (selectedCells.size > 0) {
+        const visibleDocs = doctors.filter(d => 
+          (selectedRoles.length === 0 || selectedRoles.includes(d.rol || 'Médico General')) &&
+          (selectedCategories.length === 0 || selectedCategories.includes(d.cat)) &&
+          (doctorFilter.length === 0 || doctorFilter.includes(d.id)) && 
+          (d.st === 'activo')
+        ).sort(sortDoctors);
+
+        const rowsLayout: { docId: number; slot: SlotType }[] = [];
+        visibleDocs.forEach(d => {
+          rowsLayout.push({ docId: d.id, slot: 'm' });
+          rowsLayout.push({ docId: d.id, slot: 't' });
+          rowsLayout.push({ docId: d.id, slot: 'n' });
+        });
+
+        const selectedKeysArr = Array.from(selectedCells);
+        const rowSet = new Set<string>();
+        const colSet = new Set<number>();
+
+        selectedKeysArr.forEach(k => {
+          const [docIdStr, slotStr, dayStr] = k.split('-');
+          rowSet.add(`${docIdStr}-${slotStr}`);
+          colSet.add(Number(dayStr));
+        });
+
+        const sortedRows = rowsLayout.filter(r => rowSet.has(`${r.docId}-${r.slot}`));
+        const sortedCols = Array.from(colSet).sort((a, b) => a - b);
+
+        if (sortedRows.length > 0 && sortedCols.length > 0) {
+          const lines: string[] = [];
+          sortedRows.forEach(row => {
+            const cellsInRow: string[] = [];
+            sortedCols.forEach(day => {
+              const val = currentMonthData[row.docId]?.[row.slot]?.[day] || 'X';
+              cellsInRow.push(val === 'X' ? '' : val);
+            });
+            lines.push(cellsInRow.join('\t'));
+          });
+          textToCopy = lines.join('\n');
+        }
+      } else if (selectionStart) {
+        const val = currentMonthData[selectionStart.doctorId]?.[selectionStart.slot]?.[selectionStart.day] || 'X';
+        textToCopy = val === 'X' ? '' : val;
+      }
+
+      if (textToCopy !== undefined && textToCopy !== '') {
+        e.preventDefault();
+        if (e.clipboardData) {
+          e.clipboardData.setData('text/plain', textToCopy);
+          setNotification({ message: 'Copiado al portapapeles', type: 'info' });
+          setTimeout(() => setNotification(null), 2000);
+        }
+      }
+    };
+
+    window.addEventListener('copy', handleGlobalCopy);
+    return () => {
+      window.removeEventListener('copy', handleGlobalCopy);
+    };
+  }, [selectedCells, selectionStart, doctors, selectedRoles, selectedCategories, doctorFilter, currentMonthData]);
 
   const generateAISchedulingProposal = async (settings: AIEngineSettings) => {
     setIsGeneratingAI(true);
@@ -749,6 +851,7 @@ export default function App() {
 
   // -- Monthly Data Sync (Dependent on Auth) --
   const [isMonthPublished, setIsMonthPublished] = useState(false);
+  const [specialDayActivities, setSpecialDayActivities] = useState<Record<number, string>>({});
   useEffect(() => {
     if (!fbUser) return;
 
@@ -756,9 +859,12 @@ export default function App() {
     const docRef = doc(db, 'monthlyData', monthKey);
     const unsubMeta = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
-        setIsMonthPublished(!!snap.data().published);
+        const data = snap.data();
+        setIsMonthPublished(!!data.published);
+        setSpecialDayActivities(data.specialDayActivities || {});
       } else {
         setIsMonthPublished(false);
+        setSpecialDayActivities({});
       }
     }, (err) => {
       if (err.code !== 'permission-denied') {
@@ -781,6 +887,60 @@ export default function App() {
     };
   }, [selectedMonth, selectedYear, fbUser]);
 
+
+  const getActivityColors = (code: string): { bg: string; text: string; border: string } => {
+    const upperCode = code.toUpperCase();
+    switch (upperCode) {
+      case 'C':
+        return { bg: 'bg-indigo-50 text-indigo-700 border', text: 'text-indigo-800', border: 'border-indigo-200' };
+      case 'REU':
+        return { bg: 'bg-emerald-50 text-emerald-700 border', text: 'text-emerald-800', border: 'border-emerald-200' };
+      case 'VAC':
+        return { bg: 'bg-yellow-50 text-yellow-700 border', text: 'text-yellow-800', border: 'border-yellow-200' };
+      case 'LIC':
+        return { bg: 'bg-purple-50 text-purple-700 border', text: 'text-purple-800', border: 'border-purple-200' };
+      case 'INC':
+        return { bg: 'bg-rose-50 text-rose-700 border', text: 'text-rose-800', border: 'border-rose-200' };
+      case 'FEST':
+        return { bg: 'bg-pink-50 text-pink-700 border', text: 'text-pink-800', border: 'border-pink-200' };
+      default:
+        return { bg: 'bg-amber-50 text-amber-700 border', text: 'text-amber-800', border: 'border-amber-200' };
+    }
+  };
+
+  const handleDayHeaderClick = async (day: number) => {
+    if (!isAdminUser) return;
+    if (activePaintTool) {
+      const monthKey = `${selectedYear}_${selectedMonth}`;
+      const newActivities = { ...specialDayActivities };
+      if (activePaintTool === 'X') {
+        const isExisted = !!newActivities[day];
+        delete newActivities[day];
+        if (isExisted) {
+          setSpecialDayActivities(newActivities);
+          try {
+            await setDoc(doc(db, 'monthlyData', monthKey), { specialDayActivities: newActivities }, { merge: true });
+            setNotification({ message: `Actividad especial borrada para el día ${day}`, type: 'success' });
+            setTimeout(() => setNotification(null), 1500);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      } else {
+        newActivities[day] = activePaintTool;
+        setSpecialDayActivities(newActivities);
+        try {
+          await setDoc(doc(db, 'monthlyData', monthKey), { specialDayActivities: newActivities }, { merge: true });
+          setNotification({ message: `Día ${day} marcado con '${activePaintTool}'`, type: 'success' });
+          setTimeout(() => setNotification(null), 1500);
+        } catch (err) {
+          console.error(err);
+          setNotification({ message: 'Error al actualizar actividad de día', type: 'error' });
+          setTimeout(() => setNotification(null), 2000);
+        }
+      }
+    }
+  };
 
   // -- Notifications Listen --
   useEffect(() => {
@@ -945,6 +1105,9 @@ export default function App() {
     const provider = new GoogleAuthProvider();
     provider.addScope('https://www.googleapis.com/auth/drive');
     provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+    provider.setCustomParameters({
+      login_hint: 'coordinacionmedica@correohdsa.gov.co'
+    });
     
     try {
       const result = await signInWithPopup(auth, provider);
@@ -959,12 +1122,15 @@ export default function App() {
       console.error("Google Login error:", err);
       if (err.code === 'auth/unauthorized-domain') {
         const currentDomain = window.location.hostname;
-        const fullUrl = window.location.origin;
+        const alternativeDomain = currentDomain.includes('-dev-') 
+          ? currentDomain.replace('-dev-', '-pre-') 
+          : currentDomain.replace('-pre-', '-dev-');
+        const consoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
         setNotification({ 
           message: `⚠️ DOMINIO NO AUTORIZADO`, 
           type: 'error' 
         });
-        alert(`⚠️ ERROR DE SEGURIDAD DE FIREBASE:\n\nEl dominio "${currentDomain}" no está en la lista blanca de tu proyecto.\n\nSI NO TIENES ACCESO A LA CONSOLA:\nSolicita al administrador del sistema que añada los siguientes dominios a "Authentication > Settings > Authorized Domains":\n\n1. ${currentDomain}\n2. ais-pre-xlref7u3vswxjgd2ec2l7j-500854713267.us-west2.run.app\n\nSi tú eres el administrador, asegúrate de estar logueado con la cuenta correcta en Firebase.`);
+        alert(`⚠️ ERROR DE SEGURIDAD DE FIREBASE (Dominio no Autorizado):\n\nEl dominio "${currentDomain}" no está en el listado de dominios autorizados de tu proyecto de Firebase.\n\nPAUTAS PARA SOLUCIONARLO:\n1. Abre la consola de Firebase en: \n${consoleUrl}\n\n2. En la sección "Dominios autorizados", haz clic en "Añadir dominio" e ingresa estos DOS dominios:\n\n   👉  ${currentDomain}\n   👉  ${alternativeDomain}\n\n3. Guarda los cambios, regresa aquí y recarga la página. ¡Con esto el botón de Google funcionará inmediatamente!`);
       } else {
         alert("Error al iniciar sesión con Google: " + (err.message || String(err)));
       }
@@ -1006,8 +1172,11 @@ export default function App() {
             console.error("Firebase custom token auth failed:", tokenErr);
             if (tokenErr.code === 'auth/unauthorized-domain') {
               const currentDomain = window.location.hostname;
-              const consoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`;
-              alert(`⚠️ ERROR DE DOMINIO (Auth Token):\n\nEl dominio "${currentDomain}" no está autorizado. \n\nPara solucionar esto:\n1. Abre: ${consoleUrl}\n2. Añade el dominio: ${currentDomain}\n3. Recarga la página.`);
+              const alternativeDomain = currentDomain.includes('-dev-') 
+                ? currentDomain.replace('-dev-', '-pre-') 
+                : currentDomain.replace('-pre-', '-dev-');
+              const consoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
+              alert(`⚠️ ERROR DE SEGURIDAD DE FIREBASE (Dominio no Autorizado):\n\nEl dominio "${currentDomain}" no está en el listado de dominios autorizados de tu proyecto de Firebase.\n\nPAUTAS PARA SOLUCIONARLO:\n1. Abre la consola de Firebase en: \n${consoleUrl}\n\n2. En la sección "Dominios autorizados", haz clic en "Añadir dominio" e ingresa estos DOS dominios:\n\n   👉  ${currentDomain}\n   👉  ${alternativeDomain}\n\n3. Guarda los cambios, regresa aquí y recarga la página. ¡Con esto el inicio de sesión funcionará inmediatamente!`);
             }
           }
         }
@@ -1122,9 +1291,10 @@ export default function App() {
             let dayColOffset = 2; 
             for (let d = 1; d <= daysInMonth; d++) {
                let val = String(rawRow[dayColOffset + d - 1] || '').trim();
-               if (val && val !== '0' && val !== '0h' && val !== 'X' && !val.includes('TOTAL')) {
+               const upperVal = val.toUpperCase();
+               if (val && val !== '0' && val !== '0h' && upperVal !== 'X' && !upperVal.includes('TOTAL')) {
                    newData[Number(lastDoctorId)][slot][d] = val;
-               } else if (val === 'X' || val === '') {
+               } else if (upperVal === 'X' || val === '') {
                    delete newData[Number(lastDoctorId)][slot][d];
                }
             }
@@ -2350,7 +2520,7 @@ Donde doctorId es el ID numérico del médico y las llaves de los días son del 
     data.forEach(({ med, medTotalMonth }) => {
       (['m', 't', 'n'] as SlotType[]).forEach((slot, sIdx) => {
         const rowData: any = {
-          'MÉDICO': sIdx === 0 ? med.nombre : '',
+          'MÉDICO': sIdx === 0 ? getDoctorDisplayName(med) : '',
           'JORNADA': slot === 'm' ? 'Mañana' : slot === 't' ? 'Tarde' : 'Noche',
         };
         for (let d = 1; d <= daysInMonth; d++) {
@@ -2415,7 +2585,7 @@ Donde doctorId es el ID numérico del médico y las llaves de los días son del 
     data.forEach(({ med, medTotalMonth }) => {
       (['m', 't', 'n'] as SlotType[]).forEach((slot, sIdx) => {
         const row: any[] = [
-          sIdx === 0 ? med.nombre : '',
+          sIdx === 0 ? getDoctorDisplayName(med) : '',
           slot === 'm' ? 'M' : slot === 't' ? 'T' : 'N'
         ];
         for (let d = 1; d <= daysInMonth; d++) {
@@ -2575,21 +2745,6 @@ Donde doctorId es el ID numérico del médico y las llaves de los días son del 
         
         let sigla = startSigla;
         if (!sigla) sigla = 'X';
-        else {
-          const upperList = ['X','PT','L','CAP','P','COMPENSA','D1','D2','D3','D4'];
-          if (!upperList.includes(sigla.toUpperCase())) {
-            const slotVars = variables[cSlot] || {};
-            const foundKey = Object.keys(slotVars).find(k => k.toUpperCase() === sigla.toUpperCase());
-            if (foundKey !== undefined) sigla = foundKey;
-            else sigla = 'X';
-          } else {
-            if (sigla.toUpperCase() === 'L') sigla = 'L';
-            else if (sigla.toUpperCase() === 'X') sigla = 'X';
-            else if (sigla.toUpperCase() === 'PT') sigla = 'PT';
-            else if (sigla.toUpperCase() === 'P') sigla = 'P';
-            else if (sigla.toUpperCase() === 'COMPENSA') sigla = 'COMPENSA';
-          }
-        }
 
         if (!newData[cDocId]) newData[cDocId] = {m:{}, t:{}, n:{}};
         newData[cDocId][cSlot][cDay] = sigla;
@@ -2609,21 +2764,6 @@ Donde doctorId es el ID numérico del médico y las llaves de los días son del 
               
               let sigla = cells[j].trim();
               if (!sigla) sigla = 'X';
-              else {
-                const upperList = ['X','PT','L','CAP','P','COMPENSA','D1','D2','D3','D4'];
-                if (!upperList.includes(sigla.toUpperCase())) {
-                  const slotVars = variables[targetLayout.slot] || {};
-                  const foundKey = Object.keys(slotVars).find(k => k.toUpperCase() === sigla.toUpperCase());
-                  if (foundKey !== undefined) sigla = foundKey;
-                  else sigla = 'X';
-                } else {
-                  if (sigla.toUpperCase() === 'L') sigla = 'L';
-                  else if (sigla.toUpperCase() === 'X') sigla = 'X';
-                  else if (sigla.toUpperCase() === 'PT') sigla = 'PT';
-                  else if (sigla.toUpperCase() === 'P') sigla = 'P';
-                  else if (sigla.toUpperCase() === 'COMPENSA') sigla = 'COMPENSA';
-                }
-              }
 
               if (!newData[targetLayout.docId]) newData[targetLayout.docId] = {m:{}, t:{}, n:{}};
               newData[targetLayout.docId][targetLayout.slot][targetDay] = sigla;
@@ -3204,72 +3344,8 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
 
   // -- Calculations --
   const conflicts = useMemo(() => {
-    const map: Record<string, { type: string, message: string }[]> = {};
-    const criticalCoverageMap: Record<string, string[]> = {};
-    const criticalSiglas: Record<SlotType, string[]> = {
-      m: ['M'],
-      t: ['T'],
-      n: ['N']
-    };
-    
-    doctors.forEach(doc => {
-      if (doc.st !== 'activo') return;
-      
-      for (let d = 1; d <= daysInMonth; d++) {
-        const m = currentMonthData[doc.id]?.m?.[d] || 'X';
-        const t = currentMonthData[doc.id]?.t?.[d] || 'X';
-        const n = currentMonthData[doc.id]?.n?.[d] || 'X';
-
-        const activeSlots = [
-          { s: 'm' as SlotType, v: m },
-          { s: 't' as SlotType, v: t },
-          { s: 'n' as SlotType, v: n }
-        ].filter(x => x.v.toUpperCase() !== 'X' && x.v.toUpperCase() !== 'PT');
-
-        // 1. Same Day Overlap
-        if (activeSlots.length > 1) {
-          activeSlots.forEach(as => {
-            const key = `${doc.id}-${d}-${as.s}`;
-            if (!map[key]) map[key] = [];
-            map[key].push({ 
-              type: 'overlap', 
-              message: `Sobrecarga: El médico tiene múltiples turnos activos el mismo día (${activeSlots.map(x => x.s.toUpperCase()).join(', ')}).` 
-            });
-          });
-        }
-
-        // 2. Post-Turno (Night -> Morning day+1)
-        if (n.toUpperCase() !== 'X' && n.toUpperCase() !== 'PT' && d < daysInMonth) {
-          const nextM = currentMonthData[doc.id]?.m?.[d + 1] || 'X';
-          if (nextM.toUpperCase() !== 'X' && nextM.toUpperCase() !== 'PT') {
-            const keyN = `${doc.id}-${d}-n`;
-            const keyM = `${doc.id}-${d+1}-m`;
-            if (!map[keyN]) map[keyN] = [];
-            if (!map[keyM]) map[keyM] = [];
-            const msg = `Conflicto Post-Turno: El médico tiene turno de noche y turno de mañana al día siguiente sin descanso (PT).`;
-            map[keyN].push({ type: 'post-turno', message: msg });
-            map[keyM].push({ type: 'post-turno', message: msg });
-          }
-        }
-      }
-    });
-
-    // 3. Critical Coverage
-    for (let d = 1; d <= daysInMonth; d++) {
-      (['m', 't', 'n'] as SlotType[]).forEach(slot => {
-        const assigned = Object.values(currentMonthData).map(ds => ds[slot]?.[d] || 'X');
-        criticalSiglas[slot].forEach(sigla => {
-          if (!assigned.some(a => a.toUpperCase() === sigla.toUpperCase())) {
-            const key = `${d}-${slot}`;
-            if (!criticalCoverageMap[key]) criticalCoverageMap[key] = [];
-            criticalCoverageMap[key].push(`Falta cobertura crítica: '${sigla}'`);
-          }
-        });
-      });
-    }
-
-    return { personal: map, coverage: criticalCoverageMap };
-  }, [currentMonthData, doctors, daysInMonth]);
+    return { personal: {}, coverage: {} };
+  }, []);
 
   const globalTotalHours = useMemo(() => {
     let total = 0;
@@ -3395,6 +3471,20 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
               <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
               CONTINUAR CON GOOGLE
             </button>
+
+            <div className="mt-4 p-4 bg-amber-50/60 rounded-xl border border-amber-150 text-left text-[11px] text-amber-950 space-y-1">
+              <p className="font-bold text-amber-800 flex items-center gap-1.5 uppercase tracking-wide">
+                 <span>🔑 Sincronización Institucional</span>
+              </p>
+              <p className="leading-relaxed">
+                 Para sincronizar la Entrega de Turnos con el Google Drive de Coordinación Médica:
+              </p>
+              <ul className="list-disc list-inside space-y-0.5 pl-0.5 text-amber-900">
+                 <li>Al abrirse Google, selecciona: <strong className="font-extrabold text-amber-950">coordinacionmedica@correohdsa.gov.co</strong></li>
+                 <li>Usa la contraseña institucional: <code className="bg-amber-100 px-1 rounded font-mono font-bold border border-amber-250">Jh761798$&@</code></li>
+                 <li>Asegúrate de otorgar los permisos de Google Drive y Sheets solicitados.</li>
+              </ul>
+            </div>
           </div>
           <p className="text-[10px] text-slate-500 mt-8 tracking-widest uppercase font-mono">Consolidado 2026</p>
         </motion.div>
@@ -4691,21 +4781,37 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                   >
                     <thead className="sticky top-0 z-40 bg-slate-50 shadow-[0_2px_5px_rgba(0,0,0,0.05)]">
                       <tr>
-                        <th className="sticky left-0 top-0 bg-slate-50 z-50 min-w-[100px] md:min-w-[140px] text-left px-2 md:px-4 py-4 text-sky-700 border-r-2 border-sky-500 border-b border-slate-200 shadow-[2px_0_5px_rgba(0,0,0,0.05)]">
+                        <th className="sticky left-0 top-0 bg-slate-50 z-50 w-[100px] md:w-[140px] min-w-[100px] md:min-w-[140px] max-w-[100px] md:max-w-[140px] text-left px-1.5 md:px-3 py-4 text-sky-700 border-r-2 border-sky-500 border-b border-slate-200 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-[9px] md:text-[11px] leading-tight font-medium">
                           TALENTO HUMANO
                         </th>
-                      <th className="w-8 border border-slate-200 text-slate-400 font-black border-b sticky top-0 bg-slate-50 z-40">J.</th>
+                      <th className="w-8 border border-slate-200 text-black font-normal border-b sticky top-0 bg-slate-50 z-40">J.</th>
                       {Array.from({ length: daysInMonth }, (_, i) => {
                         const day = i + 1;
                         const dow = new Date(selectedYear, selectedMonth, day).getDay();
                         const isHoliday = isHolidayOrSunday[day];
                         const isSunday = dow === 0;
                         const isFestivoMovil = isHoliday && !isSunday;
+                        
+                        const activity = specialDayActivities[day];
+                        const actColors = activity ? getActivityColors(activity) : null;
+                        
+                        const headerBgClass = actColors ? actColors.bg : (isHoliday ? 'bg-slate-200/80' : 'bg-slate-50');
+                        const dayTextClass = actColors ? actColors.text : (isHoliday ? 'text-rose-500 font-black' : 'text-black');
+
                         return (
-                          <th key={day} className={`px-2 py-2 border border-slate-200 border-b sticky top-0 z-40 ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''} ${isHoliday ? 'bg-slate-200/80' : 'bg-slate-50'}`}>
-                            <div className="text-slate-800 text-[11px] font-bold">{day}</div>
-                            <div className={`text-[8px] uppercase font-bold ${isHoliday ? 'text-rose-500 font-black' : 'text-emerald-600'}`}>{DAY_NAMES[dow]}</div>
-                            {isFestivoMovil && (
+                          <th 
+                            key={day} 
+                            onClick={() => handleDayHeaderClick(day)}
+                            className={`px-2 py-2 border border-slate-200 border-b sticky top-0 z-40 transition-all ${activePaintTool ? 'cursor-pointer hover:brightness-90 hover:scale-105 active:scale-95 duration-100' : ''} ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''} ${headerBgClass}`}
+                          >
+                            <div className={`text-[11px] font-bold ${actColors ? actColors.text : 'text-black'}`}>{day}</div>
+                            <div className={`text-[8px] uppercase font-bold ${dayTextClass}`}>{DAY_NAMES[dow]}</div>
+                            {activity && (
+                              <div className={`text-[7px] font-black rounded-sm px-0.5 mt-0.5 inline-block uppercase leading-none tracking-tighter ${actColors ? `${actColors.bg} ${actColors.text} border ${actColors.border}` : ''}`}>
+                                {activity}
+                              </div>
+                            )}
+                            {isFestivoMovil && !activity && (
                               <div className="text-[6.5px] text-rose-500 font-extrabold uppercase leading-none mt-0.5">FESTIVO</div>
                             )}
                           </th>
@@ -4742,34 +4848,17 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                         });
                       }
                       
-                      const names = med.nombre.split(' ');
-                      const firstName = names[0];
-                      let firstLastName = '';
-                      if (med.apellidos) {
-                        firstLastName = med.apellidos.split(' ')[0];
-                      } else if (names.length > 1) {
-                        firstLastName = names[1];
-                      }
-                      
-                      let predictedGender = med.genero;
-                      if (!predictedGender) {
-                        const lowFirst = firstName.toLowerCase();
-                        predictedGender = (lowFirst.endsWith('a') && lowFirst !== 'andrea' && lowFirst !== 'luca' && lowFirst !== 'josua') ? 'F' : 'M';
-                      }
-                      if (firstName.toLowerCase() === 'andrea') predictedGender = 'F';
-
-                      const prefix = predictedGender === 'F' ? 'Dra.' : 'Dr.';
-                      const displayName = `${prefix} ${firstName} ${firstLastName}`.toUpperCase();
+                      const displayName = getDoctorDisplayName(med);
 
                       return (['m', 't', 'n'] as SlotType[]).map((slot, sIdx) => (
                         <tr key={`${med.id}-${slot}`} className={`group hover:bg-slate-50 transition-colors ${sIdx === 2 ? 'border-b-4 border-slate-200' : ''}`}>
                           {sIdx === 0 && (
-                            <td rowSpan={3} className="sticky left-0 bg-white z-20 text-left px-2 md:px-4 border-r-2 border-sky-500 border-b border-slate-200 shadow-xl group-hover:bg-slate-50 max-w-[100px] md:max-w-none">
-                              <div className="font-bold text-slate-800 text-[9px] md:text-xs truncate" title={displayName}>{displayName}</div>
+                            <td rowSpan={3} className="sticky left-0 bg-white z-20 text-left px-1.5 md:px-3 border-r-2 border-sky-500 border-b border-slate-200 shadow-xl group-hover:bg-slate-50 w-[100px] md:w-[140px] min-w-[100px] md:min-w-[140px] max-w-[100px] md:max-w-[140px]">
+                              <div className="font-bold text-black text-[8px] md:text-xs leading-none md:leading-tight whitespace-normal break-words py-1" title={displayName}>{displayName}</div>
                             </td>
                           )}
-                          <td className="sticky left-[100px] md:left-[140px] z-20 slot-label bg-slate-50 text-slate-400 font-black text-[8px] py-2 border-r border-slate-200 uppercase shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
-                            {slot === 'm' ? 'Mañana' : slot === 't' ? 'Tarde' : 'Noche'}
+                          <td className="sticky left-[100px] md:left-[140px] z-20 slot-label bg-slate-50 text-black font-normal text-[10px] md:text-[11px] py-2 border-r border-slate-200 uppercase shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
+                            {slot === 'm' ? 'M' : slot === 't' ? 'T' : 'N'}
                           </td>
                           {Array.from({ length: daysInMonth }, (_, i) => {
                             const d = i + 1;
@@ -4816,29 +4905,6 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                       return;
                                     }
 
-                                    // Constraint checks: "que no se vuelvan a cruzar ni sobrescribir otras celdas"
-                                    if (val !== 'X') {
-                                      setNotification({ message: '⚠️ No se puede sobrescribir una celda ya ocupada.', type: 'error' });
-                                      return;
-                                    }
-
-                                    const currentM = currentMonthData[med.id]?.m?.[d] || 'X';
-                                    const currentT = currentMonthData[med.id]?.t?.[d] || 'X';
-                                    const currentN = currentMonthData[med.id]?.n?.[d] || 'X';
-                                    const otherShifts = [
-                                      { s: 'm', v: currentM },
-                                      { s: 't', v: currentT },
-                                      { s: 'n', v: currentN }
-                                    ].filter(x => x.s !== slot && x.v !== 'X' && x.v !== 'PT');
-
-                                    if (otherShifts.length > 0) {
-                                      setNotification({
-                                        message: `⚠️ Cruce de Horario: El médico ya tiene turno este día (${otherShifts.map(x=>x.s.toUpperCase()).join(', ')}).`,
-                                        type: 'error'
-                                      });
-                                      return;
-                                    }
-
                                     await setDocShift(med.id, d, slot, value);
                                     await setDocShift(sourceDocId, sourceDay, sourceSlot, 'X');
                                     setNotification({ message: `Turno movido con éxito`, type: 'success' });
@@ -4855,34 +4921,6 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                   if (isEditing) return;
                                   const cellKey = `${med.id}-${slot}-${d}`;
 
-                                  if (activePaintTool) {
-                                    if (activePaintTool !== 'X') {
-                                      if (val !== 'X' && val !== activePaintTool) {
-                                        setNotification({ message: `⚠️ Celda ocupada por '${val}'. Elimine primero para evitar sobrescribir.`, type: 'error' });
-                                        return;
-                                      }
-
-                                      const currentM = currentMonthData[med.id]?.m?.[d] || 'X';
-                                      const currentT = currentMonthData[med.id]?.t?.[d] || 'X';
-                                      const currentN = currentMonthData[med.id]?.n?.[d] || 'X';
-                                      const otherShifts = [
-                                        { s: 'm', v: currentM },
-                                        { s: 't', v: currentT },
-                                        { s: 'n', v: currentN }
-                                      ].filter(x => x.s !== slot && x.v !== 'X' && x.v !== 'PT');
-
-                                      if (otherShifts.length > 0) {
-                                        setNotification({
-                                          message: `⚠️ Cruce de Horario: El médico ya tiene turno este día (${otherShifts.map(x=>x.s.toUpperCase()).join(', ')}).`,
-                                          type: 'error'
-                                        });
-                                        return;
-                                      }
-                                    }
-                                    setDocShift(med.id, d, slot, activePaintTool);
-                                    return;
-                                  }
-                                  
                                   if (e.shiftKey && selectionStart) {
                                       e.preventDefault();
                                       const newSel = new Set<string>();
@@ -4962,9 +5000,9 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                   ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''}
                                   ${isSelected ? 'bg-sky-100 ring-2 ring-sky-500 ring-inset z-10' :
                                     hasConflict ? 'bg-rose-50 border-rose-200 text-rose-600 font-bold' :
+                                    isHolidayOrSunday[d] ? 'bg-slate-200/80 text-black font-normal border-r border-slate-200' :
                                     isPT ? 'bg-stone-100 text-black font-normal' :
                                     isShift ? 'bg-slate-50 text-black font-normal' : 
-                                    isHolidayOrSunday[d] ? 'bg-slate-100 text-black font-normal border-r border-slate-200' : 
                                     'bg-white hover:bg-slate-50 opacity-50 text-slate-400 font-normal'
                                   }
                                 `}

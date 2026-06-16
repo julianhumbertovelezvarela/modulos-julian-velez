@@ -10,11 +10,13 @@ import {
   CheckCircle,
   Database,
   Users as UsersIcon,
-  Clock
+  Clock,
+  DownloadCloud,
+  UploadCloud
 } from 'lucide-react';
 import { AIEngineSettings, SlotType, VarSlotConfig, Doctor } from '../types';
 import * as XLSX from 'xlsx';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, getDocs, collection } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 
 interface AdminToolboxProps {
@@ -52,6 +54,155 @@ export const AdminToolbox: React.FC<AdminToolboxProps> = ({
   const [isValidatingDrive, setIsValidatingDrive] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isExportingBackup, setIsExportingBackup] = useState(false);
+  const [isImportingBackup, setIsImportingBackup] = useState(false);
+
+  const handleExportBackup = async () => {
+    setIsExportingBackup(true);
+    onNotify("Preparando respaldo completo del sistema (médicos, siglas, configuraciones, turnos, etc.)...", "info");
+    try {
+      const getCollectionDocs = async (colPath: string) => {
+        try {
+          const snap = await getDocs(collection(db, colPath));
+          return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        } catch (e) {
+          console.error(`Error al descargar colección ${colPath}`, e);
+          return [];
+        }
+      };
+
+      const doctorsList = await getCollectionDocs('doctors');
+      const settingsList = await getCollectionDocs('settings');
+      const censusList = await getCollectionDocs('census');
+      const ruralAvailabilityList = await getCollectionDocs('ruralAvailability');
+      const availabilityCallsList = await getCollectionDocs('availabilityCalls');
+      const trainingActivitiesList = await getCollectionDocs('trainingActivities');
+      const handoversList = await getCollectionDocs('handovers');
+      const notificationsList = await getCollectionDocs('notifications');
+      const auditLogsList = await getCollectionDocs('auditLogs');
+      const monthlyDataList = await getCollectionDocs('monthlyData');
+
+      const monthlyData_subcollections: Record<string, any[]> = {};
+      for (const mDoc of monthlyDataList) {
+        const monthKey = mDoc.id;
+        try {
+          const snap = await getDocs(collection(db, 'monthlyData', monthKey, 'doctors'));
+          if (!snap.empty) {
+            monthlyData_subcollections[monthKey] = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          }
+        } catch (e) {
+          console.error(`Error en subcolección mensual ${monthKey}`, e);
+        }
+      }
+
+      const backupObj = {
+        version: "1.0",
+        createdAt: new Date().toISOString(),
+        doctors: doctorsList,
+        settings: settingsList,
+        census: censusList,
+        ruralAvailability: ruralAvailabilityList,
+        availabilityCalls: availabilityCallsList,
+        trainingActivities: trainingActivitiesList,
+        handovers: handoversList,
+        notifications: notificationsList,
+        auditLogs: auditLogsList,
+        monthlyData: monthlyDataList,
+        monthlyData_subcollections
+      };
+
+      const jsonStr = JSON.stringify(backupObj, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Respaldo_Sistema_HDSAR_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      onNotify("Respaldo exportado exitosamente. Guárdalo bien en tu computador.", "success");
+    } catch (err) {
+      console.error(err);
+      onNotify("Error al generar el archivo de respaldo", "error");
+    } finally {
+      setIsExportingBackup(false);
+    }
+  };
+
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const confirmRestore = window.confirm(
+      "⚠️ ¿ESTÁS RECONTRACONFIRMANDO LA RESTAURACIÓN?\n\n" +
+      "Se importarán todos los profesionales, siglas, programaciones de turnos, censos y actividades de capacitación en el proyecto de Firebase que esté conectado actualmente.\n\n" +
+      "Este proceso agregará o sobreescribirá los registros. ¿Deseas continuar?"
+    );
+    if (!confirmRestore) {
+      e.target.value = '';
+      return;
+    }
+
+    setIsImportingBackup(true);
+    onNotify("Restaurando datos en la nueva base de datos de Firebase...", "info");
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const text = evt.target?.result;
+        if (typeof text !== 'string') throw new Error("Formato inválido");
+
+        const backupObj = JSON.parse(text);
+        if (!backupObj || (!backupObj.doctors && !backupObj.settings)) {
+          throw new Error("El archivo no es un respaldo válido de esta aplicación.");
+        }
+
+        const restoreCollection = async (colPath: string, items: any[]) => {
+          if (!items || !Array.isArray(items)) return;
+          for (const item of items) {
+            const { id, ...data } = item;
+            if (!id) continue;
+            await setDoc(doc(db, colPath, String(id)), data, { merge: true });
+          }
+        };
+
+        if (backupObj.doctors) await restoreCollection('doctors', backupObj.doctors);
+        if (backupObj.settings) await restoreCollection('settings', backupObj.settings);
+        if (backupObj.census) await restoreCollection('census', backupObj.census);
+        if (backupObj.ruralAvailability) await restoreCollection('ruralAvailability', backupObj.ruralAvailability);
+        if (backupObj.availabilityCalls) await restoreCollection('availabilityCalls', backupObj.availabilityCalls);
+        if (backupObj.trainingActivities) await restoreCollection('trainingActivities', backupObj.trainingActivities);
+        if (backupObj.handovers) await restoreCollection('handovers', backupObj.handovers);
+        if (backupObj.notifications) await restoreCollection('notifications', backupObj.notifications);
+        if (backupObj.auditLogs) await restoreCollection('auditLogs', backupObj.auditLogs);
+        if (backupObj.monthlyData) await restoreCollection('monthlyData', backupObj.monthlyData);
+
+        if (backupObj.monthlyData_subcollections) {
+          const subMap = backupObj.monthlyData_subcollections;
+          for (const monthKey of Object.keys(subMap)) {
+            const list = subMap[monthKey];
+            if (Array.isArray(list)) {
+              for (const doctorDoc of list) {
+                const { id, ...data } = doctorDoc;
+                if (!id) continue;
+                await setDoc(doc(db, 'monthlyData', monthKey, 'doctors', String(id)), data, { merge: true });
+              }
+            }
+          }
+        }
+
+        onNotify("¡Base de datos restaurada con éxito! Recargando...", "success");
+        setTimeout(() => window.location.reload(), 1500);
+      } catch (err: any) {
+        console.error(err);
+        onNotify("Error al restaurar: " + (err.message || String(err)), "error");
+      } finally {
+        setIsImportingBackup(false);
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -467,6 +618,22 @@ export const AdminToolbox: React.FC<AdminToolboxProps> = ({
           </div>
         </div>
 
+        <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-2xl p-5 border border-amber-200 text-xs text-amber-950 space-y-2 mb-8 shadow-inner">
+          <p className="font-extrabold text-amber-800 flex items-center gap-2 text-sm uppercase tracking-wider">
+             <span>🔑 SINCRONIZACIÓN INSTITUCIONAL</span>
+          </p>
+          <p className="leading-relaxed">
+            Para asegurar que la app se sincronice directamente y en línea bajo la cuenta de Drive:
+            <strong className="block text-amber-900 mt-1">coordinacionmedica@correohdsa.gov.co</strong>
+          </p>
+          <ol className="list-decimal list-inside space-y-1.5 pl-1 text-amber-900">
+            <li>Si ya tiene otra cuenta vinculada, cierre sesión en la app o use una pestaña de incógnito.</li>
+            <li>Inicie sesión con Google seleccionando <strong>coordinacionmedica@correohdsa.gov.co</strong>.</li>
+            <li>Use la contraseña institucional: <code className="bg-amber-150/80 px-2 py-0.5 rounded font-mono font-bold border border-amber-200">Jh761798$&@</code></li>
+            <li><strong>Importante:</strong> Conceda todos los permisos de Google Drive y Sheets para habilitar la actualización automatizada.</li>
+          </ol>
+        </div>
+
         <div className="flex flex-col md:flex-row gap-4 mb-4">
           <div className="flex-1 space-y-2">
             <label className="text-[10px] font-black text-slate-400 uppercase ml-2 block">ID Carpeta Base Censos</label>
@@ -555,6 +722,73 @@ export const AdminToolbox: React.FC<AdminToolboxProps> = ({
               <Database className="w-4 h-4" /> Importar Siglas
               <input type="file" className="hidden" accept=".xlsx,.xls" onChange={(e) => handleFileUpload(e, 'siglas')} />
             </label>
+           </div>
+        </div>
+      </div>
+
+      {/* SECCIÓN DE RESPALDO Y MIGRACIÓN COMPLETA DE BASE DE DATOS */}
+      <div className="bg-white rounded-[32px] p-8 border border-slate-100 shadow-xl mt-8">
+        <div className="flex items-center gap-4 mb-6">
+          <div className="p-4 bg-indigo-50 rounded-2xl text-indigo-600 animate-pulse">
+             <Database className="w-8 h-8" />
+          </div>
+          <div>
+            <h3 className="text-2xl font-black text-slate-800 tracking-tight">MIGRACIÓN & RESPALDO DE BASE DE DATOS</h3>
+            <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-widest">Traspaso total entre proyectos de Firebase</p>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 border border-slate-150 rounded-2xl p-6 text-xs text-slate-700 space-y-3 mb-6">
+          <p className="font-bold text-slate-800 flex items-center gap-1.5 uppercase text-sm">
+             <span>📥 ¿Cómo trasladar todo a tu otra cuenta / proyecto?</span>
+          </p>
+          <p className="leading-relaxed">
+             Sigue estos sencillos pasos para migrar toda la base de datos de los profesionales, las siglas, calendarios, censos, etc. a tu nuevo proyecto de Firebase:
+          </p>
+          <ol className="list-decimal list-inside space-y-2 text-slate-600">
+             <li>Haz clic en <strong className="text-indigo-600">Generar y Descargar Respaldo Total (.json)</strong> más abajo para guardar una copia de todos los datos actuales.</li>
+             <li>Solicita o realiza la reconexión de tu nueva cuenta de Firebase (por ejemplo, a <strong className="text-slate-800">julianhumbertovelez@gmail.com</strong>).</li>
+             <li>Una vez conectado tu nuevo e de Firebase, vuelve aquí y selecciona <strong className="text-emerald-700">Restaurar / Importar Respaldo (.json)</strong>.</li>
+             <li>¡Listo! El sistema sincronizará y cargará de forma transparente todos los profesionales, siglas y calendarios en la nueva ubicación.</li>
+          </ol>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+           {/* EXPORT BUTTON */}
+           <div className="flex flex-col gap-2">
+             <button
+               onClick={handleExportBackup}
+               disabled={isExportingBackup}
+               className="w-full h-full p-6 bg-indigo-50 hover:bg-indigo-100/70 border border-indigo-150 rounded-[24px] text-left transition-all active:scale-[0.98] disabled:opacity-50 flex items-center gap-4"
+             >
+               <div className="w-12 h-12 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow">
+                 <DownloadCloud className="w-6 h-6" />
+               </div>
+               <div>
+                 <h4 className="font-black text-slate-800 uppercase text-xs tracking-wide">Exportar Respaldo Total</h4>
+                 <p className="text-[9px] text-slate-500 font-bold uppercase mt-0.5 leading-tight">Médicos, siglas, censos, etc. (.JSON)</p>
+               </div>
+             </button>
+           </div>
+
+           {/* IMPORT BUTTON */}
+           <div className="flex flex-col gap-2">
+             <label className="w-full p-6 bg-emerald-50 hover:bg-emerald-100/70 border border-emerald-150 rounded-[24px] text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-4">
+               <div className="w-12 h-12 bg-emerald-600 text-white rounded-xl flex items-center justify-center shadow">
+                 <UploadCloud className="w-6 h-6" />
+               </div>
+               <div>
+                 <h4 className="font-black text-slate-800 uppercase text-xs tracking-wide">Restaurar / Importar Respaldo</h4>
+                 <p className="text-[9px] text-slate-500 font-bold uppercase mt-0.5 leading-tight">Cargar archivo de respaldo .JSON</p>
+               </div>
+               <input
+                 type="file"
+                 className="hidden"
+                 accept=".json"
+                 onChange={handleImportBackup}
+                 disabled={isImportingBackup}
+               />
+             </label>
            </div>
         </div>
       </div>
