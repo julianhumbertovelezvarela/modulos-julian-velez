@@ -144,6 +144,90 @@ export const sortDoctors = (a: Doctor, b: Doctor) => {
   return a.nombre.localeCompare(b.nombre);
 };
 
+// --- Colombian Holiday Helper Logic ----
+function getEasterSunday(year: number) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31); // 3 = March, 4 = April
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function getEmilianiMonday(year: number, month: number, day: number) {
+  const date = new Date(year, month, day);
+  const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  if (dayOfWeek === 1) return date;
+  const diff = dayOfWeek === 0 ? 1 : 8 - dayOfWeek;
+  date.setDate(date.getDate() + diff);
+  return date;
+}
+
+export function getColombianHolidays(year: number): Set<string> {
+  const holidays = new Set<string>();
+
+  const addHoliday = (date: Date) => {
+    const key = `${date.getFullYear()}_${date.getMonth()}_${date.getDate()}`;
+    holidays.add(key);
+  };
+
+  // Fixed date holidays
+  addHoliday(new Date(year, 0, 1));   // Año Nuevo
+  addHoliday(new Date(year, 4, 1));   // Día del Trabajo
+  addHoliday(new Date(year, 6, 20));  // Grito de Independencia
+  addHoliday(new Date(year, 7, 7));   // Batalla de Boyacá
+  addHoliday(new Date(year, 11, 8));  // Inmaculada Concepción
+  addHoliday(new Date(year, 11, 25)); // Navidad
+
+  // Movable Emiliani holidays
+  addHoliday(getEmilianiMonday(year, 0, 6));   // Reyes Magos (Jan 6)
+  addHoliday(getEmilianiMonday(year, 2, 19));  // San José (Mar 19)
+  addHoliday(getEmilianiMonday(year, 5, 29));  // San Pedro y San Pablo (Jun 29)
+  addHoliday(getEmilianiMonday(year, 7, 15));  // Asunción de la Virgen (Aug 15)
+  addHoliday(getEmilianiMonday(year, 9, 12));  // Día de la Raza (Oct 12)
+  addHoliday(getEmilianiMonday(year, 10, 1));  // Todos los Santos (Nov 1)
+  addHoliday(getEmilianiMonday(year, 10, 11)); // Independencia de Cartagena (Nov 11)
+
+  // Easter dependent holidays
+  const easter = getEasterSunday(year);
+
+  // Holy Thursday
+  const holyThursday = new Date(easter);
+  holyThursday.setDate(easter.getDate() - 3);
+  addHoliday(holyThursday);
+
+  // Good Friday
+  const goodFriday = new Date(easter);
+  goodFriday.setDate(easter.getDate() - 2);
+  addHoliday(goodFriday);
+
+  // Ascension (Easter + 43 days)
+  const ascension = new Date(easter);
+  ascension.setDate(easter.getDate() + 43);
+  addHoliday(ascension);
+
+  // Corpus Christi (Easter + 64 days)
+  const corpusChristi = new Date(easter);
+  corpusChristi.setDate(easter.getDate() + 64);
+  addHoliday(corpusChristi);
+
+  // Sacred Heart (Easter + 71 days)
+  const sacredHeart = new Date(easter);
+  sacredHeart.setDate(easter.getDate() + 71);
+  addHoliday(sacredHeart);
+
+  return holidays;
+}
+
 export default function App() {
   // View States
   const [isBooting, setIsBooting] = useState(true);
@@ -151,6 +235,16 @@ export default function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
   const [selectionStart, setSelectionStart] = useState<{ doctorId: number; day: number; slot: SlotType } | null>(null);
+  const [activePaintTool, setActivePaintTool] = useState<string | null>(null);
+  const [customPaintCode, setCustomPaintCode] = useState('');
+  
+  const gridScrollRef = React.useRef<HTMLDivElement>(null);
+  const [isDragScrolling, setIsDragScrolling] = useState(false);
+  const [dragStartX, setDragStartX] = useState(0);
+  const [dragScrollLeft, setDragScrollLeft] = useState(0);
+
+  const [touchStartX, setTouchStartX] = useState(0);
+  const [touchScrollLeft, setTouchScrollLeft] = useState(0);
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -1907,6 +2001,52 @@ Donde doctorId es el ID numérico del médico y las llaves de los días son del 
     XLSX.writeFile(wb, filename);
   };
 
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (
+      target.tagName.toLowerCase() === 'input' || 
+      target.closest('input') || 
+      target.tagName.toLowerCase() === 'select' || 
+      target.closest('select')
+    ) return;
+    
+    setIsDragScrolling(true);
+    setDragStartX(e.pageX - (gridScrollRef.current?.offsetLeft || 0));
+    setDragScrollLeft(gridScrollRef.current?.scrollLeft || 0);
+  };
+
+  const handleMouseLeave = () => {
+    setIsDragScrolling(false);
+  };
+
+  const handleMouseUp = () => {
+    setIsDragScrolling(false);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDragScrolling || !gridScrollRef.current) return;
+    e.preventDefault();
+    const x = e.pageX - (gridScrollRef.current.offsetLeft || 0);
+    const walk = (x - dragStartX) * 1.5;
+    gridScrollRef.current.scrollLeft = dragScrollLeft - walk;
+  };
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!gridScrollRef.current) return;
+    const touch = e.touches[0];
+    setTouchStartX(touch.pageX - (gridScrollRef.current.offsetLeft || 0));
+    setTouchScrollLeft(gridScrollRef.current.scrollLeft || 0);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!gridScrollRef.current) return;
+    const touch = e.touches[0];
+    const x = touch.pageX - (gridScrollRef.current.offsetLeft || 0);
+    const walk = (x - touchStartX) * 1.2;
+    gridScrollRef.current.scrollLeft = touchScrollLeft - walk;
+  };
+
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -3050,6 +3190,17 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
       setIsGeneratingAI(false);
     }
   };
+
+  const isHolidayOrSunday = useMemo(() => {
+    const holidays = getColombianHolidays(selectedYear);
+    const map: Record<number, boolean> = {};
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dow = new Date(selectedYear, selectedMonth, d).getDay();
+      const key = `${selectedYear}_${selectedMonth}_${d}`;
+      map[d] = (dow === 0) || holidays.has(key);
+    }
+    return map;
+  }, [selectedYear, selectedMonth, daysInMonth]);
 
   // -- Calculations --
   const conflicts = useMemo(() => {
@@ -4415,6 +4566,108 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                 </div>
               </div>
 
+              {isAdminUser && (
+                <div className="bg-slate-50 p-4 border border-slate-200 rounded-[24px] mb-6 flex flex-wrap items-center justify-between gap-4 no-print shadow-sm mt-4">
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 bg-sky-50 rounded-xl text-sky-600 border border-sky-100">
+                      <Palette className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-black text-slate-800 uppercase block tracking-tight">Pincel de Actividades Especiales</span>
+                      <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Selecciona una actividad y haz click en las celdas del turnero</span>
+                    </div>
+                  </div>
+                  
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { code: 'C', label: 'Capacitación', color: 'bg-indigo-50 border-indigo-200 text-indigo-700' },
+                      { code: 'REU', label: 'Reunión', color: 'bg-emerald-50 border-emerald-200 text-emerald-700' },
+                      { code: 'VAC', label: 'Vacaciones', color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
+                      { code: 'LIC', label: 'Licencia', color: 'bg-purple-50 border-purple-200 text-purple-700' },
+                      { code: 'INC', label: 'Incapacidad', color: 'bg-rose-50 border-rose-200 text-rose-700' },
+                      { code: 'FEST', label: 'Festivo Trab.', color: 'bg-pink-50 border-pink-200 text-pink-700' },
+                    ].map(tool => {
+                      const isCurrent = activePaintTool === tool.code;
+                      return (
+                        <button
+                          key={tool.code}
+                          onClick={() => {
+                            if (isCurrent) {
+                              setActivePaintTool(null);
+                            } else {
+                              setActivePaintTool(tool.code);
+                              setNotification({ message: `Modo Pincel Activo: ${tool.label} (Haz clic en las celdas para pintar)`, type: 'info' });
+                            }
+                          }}
+                          className={`px-3 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center gap-1.5 uppercase tracking-tight hover:scale-105 active:scale-95 shadow-sm cursor-pointer
+                            ${isCurrent ? 'bg-sky-600 !text-white ring-2 ring-sky-500 scale-105 font-black border-sky-500' : `${tool.color}`}
+                          `}
+                        >
+                          <span className="px-1 py-0.5 rounded-md bg-white border border-slate-200 text-[9px] font-black text-slate-700">{tool.code}</span>
+                          {tool.label}
+                        </button>
+                      );
+                    })}
+
+                    <div className="flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded-xl shadow-sm">
+                      <input 
+                        placeholder="Otro código..." 
+                        className="bg-transparent border-none text-[10px] font-bold p-1 outline-none w-20 max-w-[80px]"
+                        value={customPaintCode}
+                        onChange={e => {
+                          const val = e.target.value.toUpperCase();
+                          setCustomPaintCode(val);
+                          if (val) {
+                            setActivePaintTool(val);
+                          } else {
+                            setActivePaintTool(null);
+                          }
+                        }}
+                      />
+                      {customPaintCode && (
+                        <button 
+                          onClick={() => {
+                            setCustomPaintCode('');
+                            setActivePaintTool(null);
+                          }} 
+                          className="text-xs text-rose-500 font-bold hover:scale-110 active:scale-90"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        if (activePaintTool === 'X') {
+                          setActivePaintTool(null);
+                        } else {
+                          setActivePaintTool('X');
+                          setNotification({ message: 'Borrador Activo (Haz clic para borrar turnos)', type: 'info' });
+                        }
+                      }}
+                      className={`px-3 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center gap-1.5 uppercase hover:scale-105 active:scale-95 shadow-sm cursor-pointer
+                        ${activePaintTool === 'X' ? 'bg-slate-800 text-white border-slate-800 ring-2 ring-slate-800' : 'bg-slate-50 border-slate-200 text-slate-600'}
+                      `}
+                    >
+                      <span className="font-extrabold">🧹 Borrador</span>
+                    </button>
+
+                    {activePaintTool && (
+                      <button
+                        onClick={() => {
+                          setActivePaintTool(null);
+                          setCustomPaintCode('');
+                        }}
+                        className="text-[9px] font-bold text-rose-500 hover:underline px-2 cursor-pointer"
+                      >
+                        Desactivar Pincel
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Table Platform */}
               <div className="relative">
                 {/* Mobile Scroll Indicator */}
@@ -4423,7 +4676,16 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                    <span>Días del Mes →</span>
                 </div>
                 
-                <div className="overflow-auto border border-slate-200 rounded-[18px] bg-white shadow-xl max-h-[calc(100vh-250px)] custom-scrollbar">
+                <div 
+                  ref={gridScrollRef}
+                  onMouseDown={handleMouseDown}
+                  onMouseLeave={handleMouseLeave}
+                  onMouseUp={handleMouseUp}
+                  onMouseMove={handleMouseMove}
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  className="overflow-auto border border-slate-200 rounded-[18px] bg-white shadow-xl max-h-[calc(100vh-250px)] custom-scrollbar cursor-grab active:cursor-grabbing select-none"
+                >
                   <table 
                     className="w-full text-[10px] text-center border-collapse relative"
                   >
@@ -4436,10 +4698,16 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                       {Array.from({ length: daysInMonth }, (_, i) => {
                         const day = i + 1;
                         const dow = new Date(selectedYear, selectedMonth, day).getDay();
+                        const isHoliday = isHolidayOrSunday[day];
+                        const isSunday = dow === 0;
+                        const isFestivoMovil = isHoliday && !isSunday;
                         return (
-                          <th key={day} className={`px-2 py-2 border border-slate-200 border-b sticky top-0 bg-slate-50 z-40 ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''}`}>
+                          <th key={day} className={`px-2 py-2 border border-slate-200 border-b sticky top-0 z-40 ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''} ${isHoliday ? 'bg-slate-200/80' : 'bg-slate-50'}`}>
                             <div className="text-slate-800 text-[11px] font-bold">{day}</div>
-                            <div className="text-[8px] text-emerald-600 uppercase font-bold">{DAY_NAMES[dow]}</div>
+                            <div className={`text-[8px] uppercase font-bold ${isHoliday ? 'text-rose-500 font-black' : 'text-emerald-600'}`}>{DAY_NAMES[dow]}</div>
+                            {isFestivoMovil && (
+                              <div className="text-[6.5px] text-rose-500 font-extrabold uppercase leading-none mt-0.5">FESTIVO</div>
+                            )}
                           </th>
                         );
                       })}
@@ -4520,6 +4788,64 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                 key={d}
                                 tabIndex={0}
                                 data-ref={`${med.id}-${slot}-${d}`}
+                                draggable={isAdminUser && val !== 'X'}
+                                onDragStart={(e) => {
+                                  if (!isAdminUser) return;
+                                  const textPayload = JSON.stringify({
+                                    sourceDocId: med.id,
+                                    sourceSlot: slot,
+                                    sourceDay: d,
+                                    value: val
+                                  });
+                                  e.dataTransfer.setData('application/json', textPayload);
+                                  e.dataTransfer.effectAllowed = 'move';
+                                }}
+                                onDragOver={(e) => {
+                                  if (!isAdminUser) return;
+                                  e.preventDefault();
+                                }}
+                                onDrop={async (e) => {
+                                  if (!isAdminUser) return;
+                                  e.preventDefault();
+                                  try {
+                                    const raw = e.dataTransfer.getData('application/json');
+                                    if (!raw) return;
+                                    const { sourceDocId, sourceSlot, sourceDay, value } = JSON.parse(raw);
+                                    
+                                    if (sourceDocId === med.id && sourceSlot === slot && sourceDay === d) {
+                                      return;
+                                    }
+
+                                    // Constraint checks: "que no se vuelvan a cruzar ni sobrescribir otras celdas"
+                                    if (val !== 'X') {
+                                      setNotification({ message: '⚠️ No se puede sobrescribir una celda ya ocupada.', type: 'error' });
+                                      return;
+                                    }
+
+                                    const currentM = currentMonthData[med.id]?.m?.[d] || 'X';
+                                    const currentT = currentMonthData[med.id]?.t?.[d] || 'X';
+                                    const currentN = currentMonthData[med.id]?.n?.[d] || 'X';
+                                    const otherShifts = [
+                                      { s: 'm', v: currentM },
+                                      { s: 't', v: currentT },
+                                      { s: 'n', v: currentN }
+                                    ].filter(x => x.s !== slot && x.v !== 'X' && x.v !== 'PT');
+
+                                    if (otherShifts.length > 0) {
+                                      setNotification({
+                                        message: `⚠️ Cruce de Horario: El médico ya tiene turno este día (${otherShifts.map(x=>x.s.toUpperCase()).join(', ')}).`,
+                                        type: 'error'
+                                      });
+                                      return;
+                                    }
+
+                                    await setDocShift(med.id, d, slot, value);
+                                    await setDocShift(sourceDocId, sourceDay, sourceSlot, 'X');
+                                    setNotification({ message: `Turno movido con éxito`, type: 'success' });
+                                  } catch (err) {
+                                    console.error(err);
+                                  }
+                                }}
                                 onDoubleClick={() => {
                                   if (!isAdminUser) return;
                                   setEditingCell({ id: med.id, d, slot, val: val === 'X' ? '' : val });
@@ -4528,6 +4854,34 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                   if (!isAdminUser) return;
                                   if (isEditing) return;
                                   const cellKey = `${med.id}-${slot}-${d}`;
+
+                                  if (activePaintTool) {
+                                    if (activePaintTool !== 'X') {
+                                      if (val !== 'X' && val !== activePaintTool) {
+                                        setNotification({ message: `⚠️ Celda ocupada por '${val}'. Elimine primero para evitar sobrescribir.`, type: 'error' });
+                                        return;
+                                      }
+
+                                      const currentM = currentMonthData[med.id]?.m?.[d] || 'X';
+                                      const currentT = currentMonthData[med.id]?.t?.[d] || 'X';
+                                      const currentN = currentMonthData[med.id]?.n?.[d] || 'X';
+                                      const otherShifts = [
+                                        { s: 'm', v: currentM },
+                                        { s: 't', v: currentT },
+                                        { s: 'n', v: currentN }
+                                      ].filter(x => x.s !== slot && x.v !== 'X' && x.v !== 'PT');
+
+                                      if (otherShifts.length > 0) {
+                                        setNotification({
+                                          message: `⚠️ Cruce de Horario: El médico ya tiene turno este día (${otherShifts.map(x=>x.s.toUpperCase()).join(', ')}).`,
+                                          type: 'error'
+                                        });
+                                        return;
+                                      }
+                                    }
+                                    setDocShift(med.id, d, slot, activePaintTool);
+                                    return;
+                                  }
                                   
                                   if (e.shiftKey && selectionStart) {
                                       e.preventDefault();
@@ -4607,9 +4961,11 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                   transition-all duration-150 relative h-full min-h-[30px]
                                   ${dow === 0 ? 'border-r-2 border-r-sky-500' : ''}
                                   ${isSelected ? 'bg-sky-100 ring-2 ring-sky-500 ring-inset z-10' :
-                                    hasConflict ? 'bg-rose-50 border-rose-200 text-rose-600' :
-                                    isPT ? 'bg-stone-100 text-amber-600 font-black' :
-                                    isShift ? 'bg-slate-50 text-slate-800' : 'bg-white hover:bg-slate-50 opacity-50 scale-90 text-slate-400'
+                                    hasConflict ? 'bg-rose-50 border-rose-200 text-rose-600 font-bold' :
+                                    isPT ? 'bg-stone-100 text-black font-normal' :
+                                    isShift ? 'bg-slate-50 text-black font-normal' : 
+                                    isHolidayOrSunday[d] ? 'bg-slate-100 text-black font-normal border-r border-slate-200' : 
+                                    'bg-white hover:bg-slate-50 opacity-50 text-slate-400 font-normal'
                                   }
                                 `}
                               >
@@ -4637,7 +4993,7 @@ Usa un tono directivo, formal y conciso en español. Solo usa negritas y viñeta
                                   />
                                 ) : (
                                   <>
-                                    <span className={`block w-full h-full min-h-[16px] text-[10px] tracking-tight flex items-center justify-center ${isPT || hasConflict || isShift ? 'font-black' : 'font-medium'} ${hasConflict ? 'text-rose-600' : ''}`}>
+                                    <span className={`block w-full h-full min-h-[16px] text-[10px] tracking-tight flex items-center justify-center font-normal text-black ${hasConflict ? '!text-rose-600 !font-bold' : ''}`}>
                                       {val !== 'X' ? (showGridHours ? `${val} (${getVarHours(slot, val)})` : val) : ''}
                                     </span>
                                   </>
